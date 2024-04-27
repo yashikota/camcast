@@ -1,0 +1,5 @@
+go-reverse-proxy*
+.certs/
+mediamtx/
+camcast
+camcast.exe
