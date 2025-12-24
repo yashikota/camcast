@@ -2,11 +2,13 @@ package main
 
 import (
 	"embed"
+	"flag"
 	"io/fs"
 	"log"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/pion/rtp"
@@ -22,11 +24,19 @@ const (
 	rtspAddr = ":8554"
 )
 
+var debugMode bool
+
 func main() {
+	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging")
+	flag.Parse()
+
 	log.Println("Starting CamCast...")
+	if debugMode {
+		log.Println("Debug mode enabled")
+	}
 
 	// Create RTSP server
-	rtspServer, err := server.NewRTSPServer(rtspAddr)
+	rtspServer, err := server.NewRTSPServer(rtspAddr, debugMode)
 	if err != nil {
 		log.Fatalf("Failed to create RTSP server: %v", err)
 	}
@@ -46,6 +56,44 @@ func main() {
 
 	// Create signaling server
 	signalingServer := server.NewSignalingServer()
+
+	// Track payload types for RTSP initialization
+	var (
+		trackMu          sync.Mutex
+		videoPayloadType uint8
+		audioPayloadType uint8
+		hasVideo         bool
+		hasAudio         bool
+	)
+
+	// Handle track information to initialize RTSP
+	webrtcReceiver.SetTrackHandler(func(info server.TrackInfo) {
+		trackMu.Lock()
+		defer trackMu.Unlock()
+
+		switch info.Kind {
+		case webrtc.RTPCodecTypeVideo:
+			videoPayloadType = info.PayloadType
+			hasVideo = true
+			log.Printf("Video track: PayloadType=%d, MimeType=%s", info.PayloadType, info.MimeType)
+		case webrtc.RTPCodecTypeAudio:
+			audioPayloadType = info.PayloadType
+			hasAudio = true
+			log.Printf("Audio track: PayloadType=%d, MimeType=%s", info.PayloadType, info.MimeType)
+		}
+
+		// Initialize/reinitialize RTSP when we have video
+		if hasVideo {
+			// Use default audio payload if not received yet
+			if !hasAudio {
+				audioPayloadType = 111
+			}
+			rtspServer.InitStream(videoPayloadType, audioPayloadType)
+			// Reset flags for next track pair
+			hasVideo = false
+			hasAudio = false
+		}
+	})
 
 	// Set up RTP handler to forward packets to RTSP
 	webrtcReceiver.SetRTPHandler(func(track *webrtc.TrackRemote, packet *rtp.Packet) {

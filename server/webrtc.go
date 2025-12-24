@@ -12,11 +12,22 @@ import (
 // RTPHandler is a callback for handling RTP packets
 type RTPHandler func(track *webrtc.TrackRemote, packet *rtp.Packet)
 
+// TrackInfo contains information about a received track
+type TrackInfo struct {
+	Kind        webrtc.RTPCodecType
+	PayloadType uint8
+	MimeType    string
+}
+
+// TrackHandler is a callback for when a new track is received
+type TrackHandler func(info TrackInfo)
+
 // WebRTCReceiver handles WebRTC connections and receives media streams
 type WebRTCReceiver struct {
 	mu             sync.RWMutex
 	peerConnection *webrtc.PeerConnection
 	onRTP          RTPHandler
+	onTrack        TrackHandler
 	onICECandidate func(candidate json.RawMessage) error
 }
 
@@ -30,6 +41,13 @@ func (w *WebRTCReceiver) SetRTPHandler(handler RTPHandler) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.onRTP = handler
+}
+
+// SetTrackHandler sets the handler for new tracks
+func (w *WebRTCReceiver) SetTrackHandler(handler TrackHandler) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onTrack = handler
 }
 
 // SetICECandidateHandler sets the handler for outgoing ICE candidates
@@ -94,13 +112,28 @@ func (w *WebRTCReceiver) HandleOffer(offerSDP string) (string, error) {
 
 	// Set up track handler
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("Track received: %s (%s)", track.Kind().String(), track.Codec().MimeType)
+		codec := track.Codec()
+		log.Printf("Track received: %s (MimeType: %s, PayloadType: %d)",
+			track.Kind().String(), codec.MimeType, codec.PayloadType)
 
+		// Notify about new track
 		w.mu.RLock()
-		handler := w.onRTP
+		trackHandler := w.onTrack
 		w.mu.RUnlock()
 
-		if handler == nil {
+		if trackHandler != nil {
+			trackHandler(TrackInfo{
+				Kind:        track.Kind(),
+				PayloadType: uint8(codec.PayloadType),
+				MimeType:    codec.MimeType,
+			})
+		}
+
+		w.mu.RLock()
+		rtpHandler := w.onRTP
+		w.mu.RUnlock()
+
+		if rtpHandler == nil {
 			return
 		}
 
@@ -110,7 +143,7 @@ func (w *WebRTCReceiver) HandleOffer(offerSDP string) (string, error) {
 				log.Printf("Error reading RTP: %v", err)
 				return
 			}
-			handler(track, packet)
+			rtpHandler(track, packet)
 		}
 	})
 
